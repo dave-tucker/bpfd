@@ -21,13 +21,13 @@ use crate::{
     directories::*,
     dispatcher_config::TcDispatcherConfig,
     errors::BpfmanError,
-    multiprog::{Dispatcher, TC_DISPATCHER_PREFIX},
-    oci_utils::image_manager::ImageManager,
-    types::{
+    models::{
         BytecodeImage, Direction,
         Direction::{Egress, Ingress},
         ImagePullPolicy, Program, TcProgram,
     },
+    multiprog::{Dispatcher, TC_DISPATCHER_PREFIX},
+    oci_utils::image_manager::ImageManager,
     utils::{
         bytes_to_string, bytes_to_u16, bytes_to_u32, bytes_to_usize, should_map_be_pinned,
         sled_get, sled_get_option, sled_insert,

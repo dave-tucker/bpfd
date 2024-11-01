@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use aya::maps::MapData;
 use bpfman::{
     list_programs,
-    types::ListFilter,
+    models::ListFilter,
     utils::{create_bpffs, set_dir_permissions, set_file_permissions, SOCK_MODE},
 };
 use bpfman_csi::v1::{

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use anyhow::bail;
 use bpfman::{
     add_program,
-    types::{
+    models::{
         FentryProgram, FexitProgram, KprobeProgram, Location, Program, ProgramData, TcProceedOn,
         TcProgram, TracepointProgram, UprobeProgram, XdpProceedOn, XdpProgram,
     },

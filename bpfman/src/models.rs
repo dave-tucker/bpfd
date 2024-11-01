@@ -5,93 +5,57 @@
 use std::{
     collections::HashMap,
     fmt, fs,
+    num::NonZeroU32,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
+pub struct SqliteU64(u64);
+
+impl<'a> FromSqlRow<diesel::sql_types::Binary, diesel::sqlite::Sqlite> for SqliteU64 {
+    fn build_from_row<R: diesel::row::Row<'a, diesel::sqlite::Sqlite>>(
+        row: &mut R,
+    ) -> diesel::deserialize::Result<Self> {
+        Ok(SqliteU64(row.take()?))
+    }
+}
+
 use aya::programs::ProgramInfo as AyaProgInfo;
 use chrono::{prelude::DateTime, Local};
 use clap::ValueEnum;
+use diesel::{
+    deserialize::FromSqlRow, expression::AsExpression, Identifiable, Insertable, Queryable,
+    Selectable,
+};
 use log::{info, warn};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use sled::Db;
 
 use crate::{
     directories::RTDIR_FS,
     errors::{BpfmanError, ParseError},
     multiprog::{DispatcherId, DispatcherInfo},
     oci_utils::image_manager::ImageManager,
+    schema::*,
     utils::{
         bytes_to_bool, bytes_to_i32, bytes_to_string, bytes_to_u32, bytes_to_u64, bytes_to_usize,
         sled_get, sled_get_option, sled_insert,
     },
 };
 
-/// These constants define the key of SLED DB
-pub(crate) const PROGRAM_PREFIX: &str = "program_";
-pub(crate) const PROGRAM_PRE_LOAD_PREFIX: &str = "pre_load_program_";
-const KIND: &str = "kind";
-const NAME: &str = "name";
-const ID: &str = "id";
-const LOCATION_FILENAME: &str = "location_filename";
-const LOCATION_IMAGE_URL: &str = "location_image_url";
-const LOCATION_IMAGE_PULL_POLICY: &str = "location_image_pull_policy";
-const LOCATION_USERNAME: &str = "location_username";
-const LOCATION_PASSWORD: &str = "location_password";
-const MAP_OWNER_ID: &str = "map_owner_id";
-const MAP_PIN_PATH: &str = "map_pin_path";
-const PREFIX_GLOBAL_DATA: &str = "global_data_";
-const PREFIX_METADATA: &str = "metadata_";
-const PREFIX_MAPS_USED_BY: &str = "maps_used_by_";
-const PROGRAM_BYTES: &str = "program_bytes";
+#[derive(Queryable, Identifiable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = images)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct Image {
+    pub id: i32,
+    pub registry: String,
+    pub repository: String,
+    pub name: String,
+    pub tag: Option<String>,
+    pub manifest: String,
+    pub bytecode: Vec<u8>,
+}
 
-const KERNEL_NAME: &str = "kernel_name";
-const KERNEL_PROGRAM_TYPE: &str = "kernel_program_type";
-const KERNEL_LOADED_AT: &str = "kernel_loaded_at";
-const KERNEL_TAG: &str = "kernel_tag";
-const KERNEL_GPL_COMPATIBLE: &str = "kernel_gpl_compatible";
-const KERNEL_BTF_ID: &str = "kernel_btf_id";
-const KERNEL_BYTES_XLATED: &str = "kernel_bytes_xlated";
-const KERNEL_JITED: &str = "kernel_jited";
-const KERNEL_BYTES_JITED: &str = "kernel_bytes_jited";
-const KERNEL_BYTES_MEMLOCK: &str = "kernel_bytes_memlock";
-const KERNEL_VERIFIED_INSNS: &str = "kernel_verified_insns";
-const PREFIX_KERNEL_MAP_IDS: &str = "kernel_map_ids_";
-
-const XDP_PRIORITY: &str = "xdp_priority";
-const XDP_IFACE: &str = "xdp_iface";
-const XDP_CURRENT_POSITION: &str = "xdp_current_position";
-const XDP_IF_INDEX: &str = "xdp_if_index";
-const XDP_ATTACHED: &str = "xdp_attached";
-const PREFIX_XDP_PROCEED_ON: &str = "xdp_proceed_on_";
-
-const TC_PRIORITY: &str = "tc_priority";
-const TC_IFACE: &str = "tc_iface";
-const TC_CURRENT_POSITION: &str = "tc_current_position";
-const TC_IF_INDEX: &str = "tc_if_index";
-const TC_ATTACHED: &str = "tc_attached";
-const TC_DIRECTION: &str = "tc_direction";
-const PREFIX_TC_PROCEED_ON: &str = "tc_proceed_on_";
-
-const TRACEPOINT_NAME: &str = "tracepoint_name";
-
-const KPROBE_FN_NAME: &str = "kprobe_fn_name";
-const KPROBE_OFFSET: &str = "kprobe_offset";
-const KPROBE_RETPROBE: &str = "kprobe_retprobe";
-const KPROBE_CONTAINER_PID: &str = "kprobe_container_pid";
-
-const UPROBE_FN_NAME: &str = "uprobe_fn_name";
-const UPROBE_OFFSET: &str = "uprobe_offset";
-const UPROBE_RETPROBE: &str = "uprobe_retprobe";
-const UPROBE_CONTAINER_PID: &str = "uprobe_container_pid";
-const UPROBE_PID: &str = "uprobe_pid";
-const UPROBE_TARGET: &str = "uprobe_target";
-
-const FENTRY_FN_NAME: &str = "fentry_fn_name";
-const FEXIT_FN_NAME: &str = "fexit_fn_name";
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BytecodeImage {
     pub image_url: String,
     pub image_pull_policy: ImagePullPolicy,
@@ -271,7 +235,6 @@ pub enum Location {
 impl Location {
     async fn get_program_bytes(
         &self,
-        root_db: &Db,
         image_manager: &mut ImageManager,
     ) -> Result<(Vec<u8>, Vec<String>), BpfmanError> {
         match self {
@@ -337,13 +300,173 @@ impl std::fmt::Display for Direction {
     }
 }
 
-/// ProgramData stores information about bpf programs that are loaded and managed
-/// by bpfman.
-#[derive(Debug, Clone)]
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq, Clone)]
+#[diesel(table_name = program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct ProgramData {
-    // Prior to load this will be a temporary Tree with a random ID, following
-    // load it will be replaced with the main program database tree.
-    db_tree: sled::Tree,
+    pub id: i32,
+    pub name: String,
+    pub kind: i32,
+    pub location_filename: Option<String>,
+    pub location_url: Option<String>,
+    pub location_image_pull_policy: Option<String>,
+    pub location_username: Option<String>,
+    pub location_password: Option<String>,
+    pub map_owner_id: Option<i32>,
+    pub map_pin_path: String,
+    pub program_bytes: Vec<u8>,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = kernel_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = bpfman_prog_id))]
+pub struct KernelProgramData {
+    pub id: u32,
+    pub bpfman_prog_id: u32,
+    pub name: String,
+    pub program_type: u32,
+    pub loaded_at: String,
+    pub tag: String,
+    pub gpl_compatible: bool,
+    pub btf_id: Option<u32>,
+    pub bytes_xlated: u32,
+    pub jited: bool,
+    pub bytes_jited: u32,
+    pub bytes_memlock: u32,
+    pub verified_insns: u32,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = xdp_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct XdpProgramData {
+    id: u32,
+    prog_id: u32,
+    priority: u32,
+    iface: String,
+    current_position: u32,
+    if_index: u32,
+    attached: bool,
+    proceed_on: String,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = tc_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct TcProgramData {
+    id: u32,
+    prog_id: u32,
+    priority: u32,
+    iface: String,
+    current_position: u32,
+    if_index: u32,
+    attached: bool,
+    direction: u32,
+    proceed_on: String,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = tracepoint_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct TracepointProgramData {
+    id: u32,
+    prog_id: u32,
+    name: String,
+}
+
+#[derive(Queryable, Identifiable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = kprobe_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct KprobeProgramData {
+    id: u32,
+    prog_id: u32,
+    fn_name: String,
+    offset: String,
+    retprobe: bool,
+    container_pid: u32,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = uprobe_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct UprobeProgramData {
+    id: u32,
+    prog_id: u32,
+    fn_name: String,
+    offset: String,
+    retprobe: bool,
+    container_pid: u32,
+    pid: u32,
+    target: String,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = fentry_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct FentryProgramData {
+    id: u32,
+    prog_id: u32,
+    fn_name: String,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = fexit_program_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct FexitProgramData {
+    id: u32,
+    prog_id: u32,
+    fn_name: String,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = global_data)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct GlobalData {
+    id: u32,
+    prog_id: u32,
+    key: String,
+    value: Vec<u8>,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = metadata)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct Metadata {
+    id: u32,
+    prog_id: u32,
+    key: String,
+    value: String,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = maps)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct Map {
+    id: u32,
+    name: String,
+    bpfman_prog_id: u32,
+    kernel_map_id: u32,
+}
+
+#[derive(Queryable, Identifiable, Insertable, Selectable, Debug, PartialEq)]
+#[diesel(table_name = maps_to_programs)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+#[diesel(belongs_to(Map, foreign_key = map_id))]
+#[diesel(belongs_to(ProgramData, foreign_key = prog_id))]
+pub struct MapsToPrograms {
+    id: u32,
+    map_id: u32,
+    prog_id: u32,
 }
 
 impl ProgramData {
@@ -398,19 +521,7 @@ impl ProgramData {
         global_data: HashMap<String, Vec<u8>>,
         map_owner_id: Option<u32>,
     ) -> Result<Self, BpfmanError> {
-        let db = sled::Config::default()
-            .temporary(true)
-            .open()
-            .expect("unable to open temporary database");
-
-        let mut rng = rand::thread_rng();
-        let id_rand = rng.gen::<u32>();
-
-        let db_tree = db
-            .open_tree(PROGRAM_PRE_LOAD_PREFIX.to_string() + &id_rand.to_string())
-            .expect("Unable to open program database tree");
-
-        let mut pd = Self { db_tree };
+        let mut pd = ProgramData::new_empty();
 
         pd.set_id(id_rand)?;
         pd.set_location(location)?;
@@ -831,324 +942,32 @@ impl ProgramData {
      * End bpfman program info getters/setters.
      */
 
-    /*
-     * Methods for setting and getting kernel information.
-     */
-
-    /// Retrieves the name of the program.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<String, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel name from the database.
-    pub fn get_kernel_name(&self) -> Result<String, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_NAME).map(|n| bytes_to_string(&n))
-    }
-
-    pub(crate) fn set_kernel_name(&mut self, name: &str) -> Result<(), BpfmanError> {
-        sled_insert(&self.db_tree, KERNEL_NAME, name.as_bytes())
-    }
-
-    /// Retrieves the kernel program type.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<u32, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel program type from the database.
-    pub fn get_kernel_program_type(&self) -> Result<u32, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_PROGRAM_TYPE).map(bytes_to_u32)
-    }
-
-    pub(crate) fn set_kernel_program_type(&mut self, program_type: u32) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_PROGRAM_TYPE,
-            &program_type.to_ne_bytes(),
-        )
-    }
-
-    /// Retrieves the kernel loaded timestamp.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<String, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel loaded timestamp from the database.
-    pub fn get_kernel_loaded_at(&self) -> Result<String, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_LOADED_AT).map(|n| bytes_to_string(&n))
-    }
-
-    pub(crate) fn set_kernel_loaded_at(
-        &mut self,
-        loaded_at: SystemTime,
-    ) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_LOADED_AT,
-            DateTime::<Local>::from(loaded_at)
-                .format("%Y-%m-%dT%H:%M:%S%z")
-                .to_string()
-                .as_bytes(),
-        )
-    }
-
-    /// Retrieves the kernel tag.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<String, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel tag from the database.
-    pub fn get_kernel_tag(&self) -> Result<String, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_TAG).map(|n| bytes_to_string(&n))
-    }
-
-    pub(crate) fn set_kernel_tag(&mut self, tag: u64) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_TAG,
-            format!("{:x}", tag).as_str().as_bytes(),
-        )
-    }
-
-    pub(crate) fn set_kernel_gpl_compatible(
-        &mut self,
-        gpl_compatible: bool,
-    ) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_GPL_COMPATIBLE,
-            &(gpl_compatible as i8 % 2).to_ne_bytes(),
-        )
-    }
-
-    /// Retrieves whether the kernel is GPL compatible.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<bool, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel GPL compatibility status from the database.
-    pub fn get_kernel_gpl_compatible(&self) -> Result<bool, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_GPL_COMPATIBLE).map(bytes_to_bool)
-    }
-
-    /// Retrieves the IDs of kernel maps.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<Vec<u32>, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel map IDs from the database.
-    pub fn get_kernel_map_ids(&self) -> Result<Vec<u32>, BpfmanError> {
-        self.db_tree
-            .scan_prefix(PREFIX_KERNEL_MAP_IDS.as_bytes())
-            .map(|n| n.map(|(_, v)| bytes_to_u32(v.to_vec())))
-            .map(|n| {
-                n.map_err(|e| {
-                    BpfmanError::DatabaseError("Failed to get map ids".to_string(), e.to_string())
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn set_kernel_map_ids(&mut self, map_ids: Vec<u32>) -> Result<(), BpfmanError> {
-        let map_ids = map_ids.iter().map(|i| i.to_ne_bytes()).collect::<Vec<_>>();
-
-        map_ids.iter().enumerate().try_for_each(|(i, v)| {
-            sled_insert(
-                &self.db_tree,
-                format!("{PREFIX_KERNEL_MAP_IDS}{i}").as_str(),
-                v,
-            )
-        })
-    }
-
-    /// Retrieves the BTF ID of the kernel.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<u32, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel BTF ID from the database.
-    pub fn get_kernel_btf_id(&self) -> Result<u32, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_BTF_ID).map(bytes_to_u32)
-    }
-
-    pub(crate) fn set_kernel_btf_id(&mut self, btf_id: u32) -> Result<(), BpfmanError> {
-        sled_insert(&self.db_tree, KERNEL_BTF_ID, &btf_id.to_ne_bytes())
-    }
-
-    /// Retrieves the translated bytes of the kernel program.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<u32, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel translated bytes from the database.
-    pub fn get_kernel_bytes_xlated(&self) -> Result<u32, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_BYTES_XLATED).map(bytes_to_u32)
-    }
-
-    pub(crate) fn set_kernel_bytes_xlated(&mut self, bytes_xlated: u32) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_BYTES_XLATED,
-            &bytes_xlated.to_ne_bytes(),
-        )
-    }
-
-    /// Retrieves whether the kernel program is JIT compiled.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<bool, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel JIT status from the database.
-    pub fn get_kernel_jited(&self) -> Result<bool, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_JITED).map(bytes_to_bool)
-    }
-
-    pub(crate) fn set_kernel_jited(&mut self, jited: bool) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_JITED,
-            &(jited as i8 % 2).to_ne_bytes(),
-        )
-    }
-
-    /// Retrieves the JIT compiled bytes of the kernel program.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<u32, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel JIT compiled bytes from the database.
-    pub fn get_kernel_bytes_jited(&self) -> Result<u32, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_BYTES_JITED).map(bytes_to_u32)
-    }
-
-    pub(crate) fn set_kernel_bytes_jited(&mut self, bytes_jited: u32) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_BYTES_JITED,
-            &bytes_jited.to_ne_bytes(),
-        )
-    }
-
-    /// Retrieves the memory lock bytes of the kernel program.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<u32, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel memory lock bytes from the database.
-    pub fn get_kernel_bytes_memlock(&self) -> Result<u32, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_BYTES_MEMLOCK).map(bytes_to_u32)
-    }
-
-    pub(crate) fn set_kernel_bytes_memlock(
-        &mut self,
-        bytes_memlock: u32,
-    ) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_BYTES_MEMLOCK,
-            &bytes_memlock.to_ne_bytes(),
-        )
-    }
-
-    /// Retrieves the number of verified instructions of the kernel program.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Result<u32, BpfmanError>`.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - There is an issue fetching the kernel verified instructions count from the database.
-    pub fn get_kernel_verified_insns(&self) -> Result<u32, BpfmanError> {
-        sled_get(&self.db_tree, KERNEL_VERIFIED_INSNS).map(bytes_to_u32)
-    }
-
-    pub(crate) fn set_kernel_verified_insns(
-        &mut self,
-        verified_insns: u32,
-    ) -> Result<(), BpfmanError> {
-        sled_insert(
-            &self.db_tree,
-            KERNEL_VERIFIED_INSNS,
-            &verified_insns.to_ne_bytes(),
-        )
-    }
-
+    // Called after progam is loaded to set kernel info
     pub(crate) fn set_kernel_info(&mut self, prog: &AyaProgInfo) -> Result<(), BpfmanError> {
-        self.set_id(prog.id())?;
-        self.set_kernel_name(
+        self.id = prog.id();
+        self.kernel_name = Some(
             prog.name_as_str()
-                .expect("Program name is not valid unicode"),
-        )?;
-        self.set_kernel_program_type(prog.program_type())?;
-        self.set_kernel_loaded_at(prog.loaded_at())?;
-        self.set_kernel_tag(prog.tag())?;
-        self.set_kernel_gpl_compatible(prog.gpl_compatible())?;
-        self.set_kernel_btf_id(prog.btf_id().map_or(0, |n| n.into()))?;
-        self.set_kernel_bytes_xlated(prog.size_translated())?;
-        self.set_kernel_jited(prog.size_jitted() != 0)?;
-        self.set_kernel_bytes_jited(prog.size_jitted())?;
-        self.set_kernel_verified_insns(prog.verified_instruction_count())?;
-        // Ignore errors here since it's possible the program was deleted mid
-        // list, causing aya apis which make system calls using the file descriptor
-        // to fail.
+                .expect("Program name is not valid unicode")
+                .to_string(),
+        );
+        self.kernel_program_type = Some(prog.program_type());
+        self.kernel_loaded_at = Some(prog.loaded_at());
+        self.kernel_tag = Some(format!("{:x}", prog.tag()));
+        self.kernel_gpl_compatible = Some(prog.gpl_compatible());
+        self.kernel_btf_id = prog.btf_id();
+        self.kernel_bytes_xlated = Some(prog.size_translated());
+        self.kernel_jited = Some(prog.size_jitted() != 0);
+        self.kernel_bytes_jited = Some(prog.size_jitted());
+        self.kernel_verified_insns = Some(prog.verified_instruction_count());
         if let Ok(ids) = prog.map_ids() {
-            self.set_kernel_map_ids(ids)?;
+            self.kernel_map_ids = Some(ids);
         }
         if let Ok(bytes_memlock) = prog.memory_locked() {
-            self.set_kernel_bytes_memlock(bytes_memlock)?;
+            self.kernel_bytes_memlock = Some(bytes_memlock);
         }
 
         Ok(())
     }
-
-    /*
-     * End kernel info getters/setters.
-     */
 }
 
 #[derive(Debug, Clone)]

@@ -12,8 +12,8 @@ pub use xdp::XdpDispatcher;
 use crate::{
     config::{InterfaceConfig, XdpMode},
     errors::BpfmanError,
+    models::{Direction, Program, ProgramType},
     oci_utils::image_manager::ImageManager,
-    types::{Direction, Program, ProgramType},
     utils::bytes_to_string,
 };
 

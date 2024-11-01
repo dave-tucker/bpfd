@@ -14,8 +14,8 @@ use aya::Endianness;
 use aya_obj::Object;
 use base64::{engine::general_purpose, Engine};
 use bpfman::{
+    models::{BytecodeImage, ImagePullPolicy, MapType, ProgramType},
     pull_bytecode,
-    types::{BytecodeImage, ImagePullPolicy, MapType, ProgramType},
 };
 use log::{debug, warn};
 

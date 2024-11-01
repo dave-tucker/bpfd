@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use bpfman::types::ProgramType;
+use bpfman::models::ProgramType;
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use hex::FromHex;
 

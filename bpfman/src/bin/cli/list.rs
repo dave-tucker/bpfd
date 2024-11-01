@@ -2,7 +2,7 @@
 // Copyright Authors of bpfman
 
 use anyhow::bail;
-use bpfman::{list_programs, types::ListFilter};
+use bpfman::{list_programs, models::ListFilter};
 
 use crate::{args::ListArgs, table::ProgTable};
 

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of bpfman
 use bpfman::{
-    add_program, get_program, list_programs, pull_bytecode, remove_program,
-    types::{
+    add_program, get_program, list_programs,
+    models::{
         FentryProgram, FexitProgram, KprobeProgram, ListFilter, Location, Program, ProgramData,
         TcProceedOn, TcProgram, TracepointProgram, UprobeProgram, XdpProceedOn, XdpProgram,
     },
+    pull_bytecode, remove_program,
 };
 use bpfman_api::v1::{
     attach_info::Info, bpfman_server::Bpfman, bytecode_location::Location as RpcLocation,

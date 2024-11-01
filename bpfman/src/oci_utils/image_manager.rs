@@ -24,8 +24,8 @@ use sled::Db;
 use tar::Archive;
 
 use crate::{
+    models::ImagePullPolicy,
     oci_utils::{cosign::CosignVerifier, ImageError},
-    types::ImagePullPolicy,
     utils::{sled_get, sled_insert},
 };
 

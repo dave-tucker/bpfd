@@ -3,7 +3,7 @@
 
 use bpfman::{
     errors::BpfmanError,
-    types::{BytecodeImage, Location, Program},
+    models::{BytecodeImage, Location, Program},
 };
 
 use crate::v1::{

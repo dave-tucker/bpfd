@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of bpfman
 
-use bpfman::types::{ImagePullPolicy, Location, ProbeType::*, Program};
+use bpfman::models::{ImagePullPolicy, Location, ProbeType::*, Program};
 use comfy_table::{Cell, Color, Table};
 use hex::encode_upper;
 pub(crate) struct ProgTable(Table);

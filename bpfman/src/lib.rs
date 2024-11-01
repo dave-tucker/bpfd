@@ -15,7 +15,6 @@ use aya::{
     Btf, EbpfLoader,
 };
 use log::{debug, info, warn};
-use sled::{Config as SledConfig, Db};
 use tokio::time::{sleep, Duration};
 use utils::initialize_bpfman;
 
@@ -23,15 +22,15 @@ use crate::{
     config::Config,
     directories::*,
     errors::BpfmanError,
+    models::{
+        BytecodeImage, Direction, ListFilter,
+        ProbeType::{self, *},
+        Program, ProgramData, ProgramType,
+    },
     multiprog::{
         Dispatcher, DispatcherId, DispatcherInfo, TC_DISPATCHER_PREFIX, XDP_DISPATCHER_PREFIX,
     },
     oci_utils::image_manager::ImageManager,
-    types::{
-        BytecodeImage, Direction, ListFilter,
-        ProbeType::{self, *},
-        Program, ProgramData, ProgramType, PROGRAM_PREFIX,
-    },
     utils::{
         bytes_to_string, bytes_to_u32, get_error_msg_from_stderr, get_ifindex, open_config_file,
         set_dir_permissions, should_map_be_pinned, sled_insert,
@@ -41,10 +40,11 @@ use crate::{
 mod config;
 mod dispatcher_config;
 pub mod errors;
+pub mod models;
 mod multiprog;
 mod oci_utils;
+pub mod schema;
 mod static_program;
-pub mod types;
 pub mod utils;
 
 const MAPS_MODE: u32 = 0o0660;
@@ -85,18 +85,11 @@ pub(crate) mod directories {
     // StateDirectory: /var/lib/bpfman/
     pub(crate) const STDIR_MODE: u32 = 0o6770;
     pub(crate) const STDIR: &str = "/var/lib/bpfman";
+    // Database file
     #[cfg(not(test))]
-    pub(crate) const STDIR_DB: &str = "/var/lib/bpfman/db";
-}
-
-#[cfg(not(test))]
-pub(crate) fn get_db_config() -> SledConfig {
-    SledConfig::default().path(STDIR_DB)
-}
-
-#[cfg(test)]
-pub(crate) fn get_db_config() -> SledConfig {
-    SledConfig::default().temporary(true)
+    pub(crate) const DATABASE_URL: &str = "/var/lib/bpfman/bpfman.db";
+    #[cfg(test)]
+    pub(crate) const DATABASE_URL: &str = ":memory:";
 }
 
 /// Adds an eBPF program to the system.
@@ -635,23 +628,6 @@ pub async fn pull_bytecode(image: BytecodeImage) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn init_database(sled_config: SledConfig) -> Result<Db, BpfmanError> {
-    let database_config = open_config_file().database().to_owned().unwrap_or_default();
-    for _ in 0..=database_config.max_retries {
-        if let Ok(db) = sled_config.open() {
-            debug!("Successfully opened database");
-            return Ok(db);
-        } else {
-            info!(
-                "Database lock is already held, retrying after {} milliseconds",
-                database_config.millisec_delay
-            );
-            sleep(Duration::from_millis(database_config.millisec_delay)).await;
-        }
-    }
-    Err(BpfmanError::DatabaseLockError)
-}
-
 // Make sure to call init_image_manger if the command requires interaction with
 // an OCI based container registry. It should ONLY be used where needed, to
 // explicitly control when bpfman blocks for network calls to both sigstore's
@@ -663,7 +639,7 @@ pub(crate) async fn init_image_manager() -> ImageManager {
         .expect("failed to initialize image manager")
 }
 
-fn get_dispatcher(id: &DispatcherId, root_db: &Db) -> Option<Dispatcher> {
+fn get_dispatcher(id: &DispatcherId, root_db: &Connection) -> Option<Dispatcher> {
     let tree_name_prefix = match id {
         DispatcherId::Xdp(DispatcherInfo(if_index, _)) => {
             format!("{}_{}", XDP_DISPATCHER_PREFIX, if_index)
